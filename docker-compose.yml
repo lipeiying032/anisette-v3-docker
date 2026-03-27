@@ -1,0 +1,90 @@
+# ============================================================
+#  SideStore Anisette-v3 Server — VPS 部署方案
+#  适用场景：海外 VPS + 公网 IP，SideStore 指向此自建服务器
+#  作者备注：不需要 AltServer-Linux，SideStore 自身处理签名
+#
+#  第一轮修复：
+#  [BUG1] healthcheck: curl -f → curl -sf（-s 静默输出）
+#  [BUG2] start_period: 20s → 180s（首次需下载苹果认证库）
+#  [BUG3] nginx depends_on 改用 condition: service_healthy
+#  [BUG4] certbot 新增 depends_on nginx（续签需 nginx 提供 webroot）
+#  [BUG5] certbot entrypoint: $${!} 在 /bin/sh 不可靠 → 简单顺序循环
+#  第二轮修复（联网复查后）：
+#  [BUG-A] 更正注释：镜像内 curl 确实存在（Dockerfile 明确安装），上轮注释有误
+# ============================================================
+
+services:
+
+  # ─── 1. Anisette v3 服务器（核心组件）──────────────────────
+  anisette:
+    image: dadoum/anisette-v3-server:latest
+    container_name: anisette-v3
+    restart: always
+    volumes:
+      # 持久化苹果认证库文件，防止重启后重新初始化
+      - anisette_data:/home/Alcoholic/.config/anisette-v3/lib/
+    expose:
+      - "6969"          # 只对内部网络暴露，不直接对外
+    networks:
+      - anisette_net
+    healthcheck:
+      # 镜像基于 debian:stable-slim，Dockerfile 中已安装 curl（ca-certificates curl）
+      # 使用 curl -sf 检测 HTTP 响应更语义化（-s 静默 -f 4xx/5xx 返回非零退出码）
+      # 注：上一轮 BUG1 注释"镜像内无 curl"有误，现已更正
+      test: ["CMD-SHELL", "curl -sf http://localhost:6969 > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # [BUG2 FIX] 首次启动需从苹果服务器下载 Apple Music APK 并提取认证库
+      # 视网络速度需要 1~5 分钟，20s 远不够，改为 180s
+      start_period: 180s
+
+  # ─── 2. Nginx 反向代理（HTTPS 终结）────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: anisette-nginx
+    restart: always
+    ports:
+      - "80:80"         # 用于 Let's Encrypt HTTP 验证
+      - "443:443"       # HTTPS 对外服务
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./certbot/www:/var/www/certbot:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+    networks:
+      - anisette_net
+    # [BUG3 FIX] 原用简单列表，只等容器启动不等服务就绪
+    # 改用 condition: service_healthy，确保 anisette 真正能响应后才启动 nginx
+    depends_on:
+      anisette:
+        condition: service_healthy
+
+  # ─── 3. Certbot（自动申请/续签 SSL 证书）───────────────────
+  certbot:
+    image: certbot/certbot:latest
+    container_name: anisette-certbot
+    # [NEW BUG A FIX] 原缺少 restart 策略：无限循环容器若意外退出将永久死亡
+    restart: unless-stopped
+    volumes:
+      - ./certbot/www:/var/www/certbot
+      - ./certbot/conf:/etc/letsencrypt
+      # [NEW BUG B FIX] 挂载共享信号目录：续签成功后写 reload 标记文件
+      # 宿主机 cron 检测到该文件后执行 docker exec reload nginx（见 SETUP.md）
+      - ./certbot/reload:/var/reload-signal
+    depends_on:
+      - nginx
+    # --deploy-hook 在续签成功后写入信号文件通知宿主机 cron 重载 nginx
+    # certbot 容器内无 docker CLI，不能直接 exec nginx，只能用文件信号桥接
+    entrypoint: /bin/sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet --deploy-hook 'touch /var/reload-signal/reload'; sleep 12h; done"
+    networks:
+      - anisette_net
+
+# ─── 持久化存储卷 ──────────────────────────────────────────────
+volumes:
+  anisette_data:
+    name: anisette-v3_data
+
+# ─── 内部网络（隔离容器通信）──────────────────────────────────
+networks:
+  anisette_net:
+    driver: bridge

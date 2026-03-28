@@ -1,9 +1,2 @@
-# 防止已替换域名的配置文件被追踪
-nginx/conf.d/anisette.conf
-nginx/conf.d/bootstrap.conf
+# 防止含真实 IP 的 servers.json 被提交
 servers.json
-
-# 证书和数据目录绝对不能上传
-certbot/conf/
-certbot/www/
-certbot/reload/

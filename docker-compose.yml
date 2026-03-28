@@ -8,10 +8,15 @@ services:
     volumes:
       - anisette_data:/home/Alcoholic/.config/anisette-v3/lib/
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:6969 > /dev/null || exit 1"]
+      # 用 bash 内置的 /dev/tcp 做 TCP 连通性检测
+      # 不依赖 curl / wget 等外部工具，debian:stable-slim 自带 bash 即可运行
+      # 注意：anisette-v3-server 运行时镜像不包含 curl（curl 只在编译阶段使用）
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/6969' 2>/dev/null || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
+      # 首次启动需从苹果服务器下载 Apple Music APK 并提取认证库
+      # 视 VPS 网速，需要 1～5 分钟，设为 180s 确保不会误判为 unhealthy
       start_period: 180s
 
 volumes:
